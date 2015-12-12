@@ -1,0 +1,173 @@
+* ckent
+
+ckent is a Clojure library for reversibly transforming sequential internal
+identifiers into valid V4 (random) UUIDs that are indistinguishable from actual
+random UUIDs. Custom formats are also supported.
+
+It is designed to mitigate [[https://www.owasp.org/index.php/Top_10_2013-Insecure_Direct_Object_References][Insecure Direct Object References]], a class of
+vulnerability caused by exposing internal identifiers.
+
+** Usage
+
+Encrypt:
+#+BEGIN_SRC clojure
+(require '[ckent.core :as c])
+(def k (c/random-key))
+;; Blowfish key "748f22bec90d4bea8ab000a69229ef3f"
+(c/uuid k "Testing!")
+;; => #uuid "444d0eb5-f370-4daa-bde8-abf5ea70d13a"
+(c/uuid k "Tasting!")
+;; => #uuid "648a3442-e59d-477d-b61d-6977691daeaf"
+(c/uuid k 0xBEEEEEEEEEE5)
+;; => #uuid "c2b4bd39-3bc8-4e28-a86e-4c0800502c5c"
+#+END_SRC
+
+Decrypt:
+#+BEGIN_SRC clojure
+(c/decode-str (c/decrypt-uuid k *3))
+;; => "Testing!"
+(format "%x" (c/decrypt-uuid k *2)) 
+;; => "beeeeeeeeee5"
+#+END_SRC
+
+HMAC ensures value was not tampered with and has been decrypted properly:
+#+BEGIN_SRC clojure
+(c/uuid (random-key) "Test")
+;; => #uuid "887e8ea7-5626-43f6-a072-8fffe04dbc6a"
+(c/decrypt-uuid k *1)
+;; => nil
+#+END_SRC
+
+Adding support for additional types:
+#+BEGIN_SRC clojure
+(c/uuid k true)
+;; => IllegalArgumentException No method in multimethod 'encode' for dispatch
+;;    value: class java.lang.Boolean
+(defmethod c/encode Boolean [v] (if v BigInteger/ONE BigIntger/ZERO))
+(def decode-boolean pos?) 
+(c/uuid k true)
+;; => #uuid "f8b3ee26-eb83-4028-a1e2-56bf7675b793"
+(decode-boolean (c/decrypt-uuid k *1))
+;; => true
+#+END_SRC
+
+Custom formats:
+#+BEGIN_SRC clojure
+;; 51 base32 chars = 255 bits = 47 + 80 + 128
+(def params {:fmt [[47  :iv-seed]
+                   [80  :hmac]
+                   [128 :ciphertext]]
+             :key (c/random-key "AES" 256)
+             :cipher "AES/CBC/NoPadding"})
+(.toString (c/custom params "Secret~Message") 32)
+;; => "ii2qcalka5nb2b57h43nk0h6r12q9ltqfuv5a4hmekistem9u2p"
+(.toString (c/custom params "Secret~Message") 32)
+;; => "nq8a4ev2r5nb2b57h43nk0h6r0ghc1kpskb3347i075nk1pu4iv"
+(c/decode-str (c/decrypt-custom params (BigInteger. *1 32)))
+;; => "Secret~Message"
+(c/decrypt-custom (assoc params :key (c/random-key "AES" 256))
+                  (BigInteger. *2 32))
+;; => nil
+
+;; Mario Maker level IDs, just for fun.
+;; See note about streaming modes below for why this is insecure.
+(def params {:fmt [[16 :ciphertext]
+                   [16 0]
+                   [ 7 0]
+                   [ 5 :iv-seed]
+                   [12 :hmac]
+                   [ 8 :ciphertext]]
+             :key (c/random-key "AES" 256)
+             :cipher "AES/CTR/NoPadding"})
+(->> (c/custom params "(M)")
+     (format "%x")
+     (partition 4)
+     (map clojure.string/join)
+     (clojure.string/join "-")
+     (.toUpperCase))
+;; => "1D34-0000-01D6-49A8"
+(->> (BigInteger. (.replaceAll *1 "-" "") 16)
+     (c/decrypt-custom params)
+     (c/decode-str))
+;; => "(M)"
+#+END_SRC
+
+** Implementation details
+
+*** UUIDs
+
+RFC 4112 specifies that version 4 (random) UUIDs have the form:
+xxxxxxxx-xxxx-Vxxx-Wxxx-xxxxxxxxxxxx
+
+Where:
+ - V has the bit pattern: 1 0 0 0 (0x4) to indicate the version,
+ - W has the bit pattern: 1 0 x x (0x[89AB]) to indicate the variant,
+ - and all x are randomly or pseudorandomly generated
+
+This gives us 122 usable bits, which should be indistinguishable from random
+data.
+
+Since we have less than 128 bits, ciphers with >=128 bit block sizes such as AES
+cannot be used in normal block modes. Blowfish has 64-bits bits and is really
+the only choice with these constraints.
+
+We use 64 bits for a Blowfish-encrypted payload, and the remaining 58 bits for a
+(truncated) SHA-256 HMAC. This ensures the output is always indistinguishable
+from randomly-generated values, even if the inputs follow predictable patterns,
+and provides a small but acceptable level of assurance that the value wasn't
+tampered with, and that we're decrypting it with the right key, etc.
+
+Note that RFC 2104 advises against truncating HMACs to fewer than 80 bits, and
+it was written in 1997. 58 bits is enough to deter casual tampering and prevent
+accidentally trying to decrypt a truly random value, but it is probably far too
+few to stop a dedicated attacker.
+
+*** BigInteger
+
+Most functions in the library deal with Java's BigInteger class (NOT Clojure's
+BigInt class). Having an abitrarily-sized integer type that we can do bit-level
+operations on and easily convert back and forth to a byte array greatly
+simplifies dealing with the awkward number of usable bits in a UUID.
+
+*** Crypto
+
+**** Stream modes
+
+Beware of the temptation to use a streaming mode for the ability to truncate a
+cipher with a larger block size to fewer bytes: this is not what those modes are
+designed for, and using them properly actually requires significantly MORE
+bytes. In streaming modes it is critically important to never re-use an
+initialization vector. Generating a unique IV for each message is possible, but
+it is the size of a full block and you need to include it with the message so
+you have it for decryption.
+
+Additionally, since there is a 1:1 input:output byte correspondence in stream
+mode, a MAC is also critically important. Consider what happens if we encrypt
+sequential IDs from 0-255: the value will always live in the final byte of the
+ciphertext. Even if we use a unique, perfectly random IV for every identifier,
+an attacker can still enumerate every possibility by changing the final byte,
+despite not knowing what value it will decrypt to.
+
+**** ECB mode
+
+Since we are only encrypting a single block, the traditional dangers of using
+ECB mode do not apply.
+
+**** Initialization vectors
+
+If it is desired to have the same identifier produce multiple possible outputs,
+it is possible to trade some bits of the HMAC for seed bits to generate an IV,
+or use a custom output format with additional bits.
+
+** Rationale
+
+- avoid exposing internal ids in APIs
+- reversibly convert sequential/short ids to random UUIDs
+- seamlessly mix with actual random UUIDS
+
+** License
+
+Released into the public domain.
+
+See UNLICENSE or <http://unlicense.org> for details.
+
