@@ -228,10 +228,11 @@
     (.doFinal c bs)))
 
 (defn ^BigInteger encipher
-  [^String algo ^Key k ^IvParameterSpec iv v]
-  (->> (to-blocks (block-size algo) v)
-       (encipher* algo k iv)
-       (encode)))
+  ([^String algo ^Key k ^IvParameterSpec iv v] (encipher algo k iv (block-size algo) v)) 
+  ([^String algo ^Key k ^IvParameterSpec iv ^Number block-size v]
+   (->> (to-blocks block-size v)
+        (encipher* algo k iv)
+        (encode))))
 
 (defn ^"[B" decipher*
   [^String algo ^Key k ^IvParameterSpec iv ^"[B" bs]
@@ -242,10 +243,12 @@
     (.doFinal c bs)))
 
 (defn decipher
-  [^String algo ^Key k ^IvParameterSpec iv v]
-  (->> (to-blocks (block-size algo) v)
-       (decipher* algo k iv)
-       (encode)))
+  ([^String algo ^Key k ^IvParameterSpec iv v]
+   (decipher algo k iv (block-size algo) v))
+  ([^String algo ^Key k ^IvParameterSpec iv ^Number block-size v]
+   (->> (to-blocks block-size v)
+        (decipher* algo k iv)
+        (encode))))
 
 (defn random-key
   "Randomly generate a key for use with encipher and decipher."
@@ -271,6 +274,76 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Custom schemes
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defn- valid-format?
+  [fmt]
+  (and (coll? fmt)
+       (not-empty fmt)
+       (every? coll? fmt)
+       (every? #(= 2 %) (map count fmt))
+       (every? number? (map first fmt))))
+
+(defn- fmt-size
+  [fmt k]
+  (->> (filter #(= k (last %)) fmt)
+       (map first)
+       (reduce +)))
+
+(defn- generate-iv-seed
+  [size]
+  (when (pos? size)
+    (let [iv-seed-bytes (byte-array (Math/ceil (/ size Byte/SIZE)))]
+      (.nextBytes (SecureRandom.) iv-seed-bytes)
+      (take-last-bits size (encode iv-seed-bytes)))))
+
+(defn custom
+  [{:keys [fmt key cipher mac static-iv]
+    :or {mac "HmacSHA256"}}
+   v]
+  {:pre [(valid-format? fmt)]}
+  (let [iv-size (fmt-size fmt :iv-seed)
+        iv-seed (generate-iv-seed iv-size)
+        iv (cond static-iv      static-iv
+                 (pos? iv-size) (hash-iv cipher iv-seed))
+
+        hmac-size (fmt-size fmt :hmac)
+        hmac (when (pos? hmac-size)
+               (take-last-bits hmac-size (hmac mac key v)))
+
+        ct-bits (fmt-size fmt :ciphertext)
+        ct-bytes (Math/ceil (/ ct-bits Byte/SIZE))
+        ct (encipher cipher key iv ct-bytes v)]
+    (assert (>= ct-bits (.bitLength ct)) "format has enough space for ciphertext")
+    (pack fmt {:ciphertext ct
+               :iv-seed iv-seed
+               :hmac hmac})))
+
+(defn decrypt-custom
+  [{:keys [fmt key cipher mac static-iv]
+    :or {mac "HmacSHA256"}}
+   v]
+  {:pre [(valid-format? fmt)]}
+  (let [m (unpack fmt v)
+        iv-size (fmt-size fmt :iv-seed)
+        iv-seed (:iv-seed m)
+        iv (cond static-iv      static-iv
+                 (pos? iv-size) (hash-iv cipher iv-seed))
+
+        pt-bits (fmt-size fmt :ciphertext)
+        pt-bytes (Math/ceil (/ pt-bits Byte/SIZE))
+        pt (take-last-bits pt-bits (decipher cipher key iv pt-bytes
+                                             (:ciphertext m)))
+
+        hmac-size (fmt-size fmt :hmac)
+        hmac (when (pos? hmac-size) (take-last-bits hmac-size (hmac mac key pt)))]
+    (when (or (zero? hmac-size)
+              (= hmac (:hmac m)))
+      pt)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Encrypted UUIDs
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -291,48 +364,23 @@
     (when (= (:hmac m) (take-last-bits 58 hmac)) pt)))
 
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Custom schemes
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(def uuid15-iv (hash-iv "Blowfish/CTS/NoPadding" 31337))
 
-(defn- fmt-size
-  [fmt k]
-  (->> (filter #(= k (last %)) fmt)
-       (map first)
-       (reduce +)))
+(defn uuid15
+  [k v]
+  (write-uuid
+   (custom {:fmt [[120 :ciphertext]
+                  [  2 :hmac]]
+            :cipher "Blowfish/CTS/NoPadding"
+            :static-iv uuid15-iv
+            :key k}
+           v)))
 
-(defn- generate-iv-seed
-  [size]
-  (when (pos? size)
-    (let [iv-seed-bytes (byte-array (Math/ceil (/ size Byte/SIZE)))]
-      (.nextBytes (SecureRandom.) iv-seed-bytes)
-      (take-last-bits size (encode iv-seed-bytes)))))
-
-(defn custom
-  [{:keys [fmt key cipher mac]
-    :or {mac "HmacSHA256"}}
-   v]
-  (let [iv-size (fmt-size fmt :iv-seed)
-        iv-seed (generate-iv-seed iv-size)
-        hmac-size (fmt-size fmt :hmac)
-        hmac (when (pos? hmac-size) (take-last-bits hmac-size (hmac mac key v)))
-        iv (when (pos? iv-size) (hash-iv cipher iv-seed))
-        ct (encipher cipher key iv v)]
-    (pack fmt {:ciphertext ct
-               :iv-seed iv-seed
-               :hmac hmac})))
-
-(defn decrypt-custom
-  [{:keys [fmt key cipher mac]
-    :or {mac "HmacSHA256"}}
-   v]
-  (let [m (unpack fmt v)
-        iv-size (fmt-size fmt :iv-seed)
-        iv-seed (:iv-seed m)
-        hmac-size (fmt-size fmt :hmac)
-        iv (when (pos? iv-size) (hash-iv cipher iv-seed))
-        pt (take-last-bits (fmt-size fmt :ciphertext)
-                           (decipher cipher key iv (:ciphertext m)))
-        hmac (when (pos? hmac-size) (take-last-bits hmac-size (hmac mac key pt)))]
-    (when (or (zero? hmac-size) (= hmac (:hmac m)))
-      pt)))
+(defn decrypt-uuid15
+  [k u]
+  (decrypt-custom {:fmt [[120 :ciphertext]
+                         [  2 :hmac]]
+                   :cipher "Blowfish/CTS/NoPadding"
+                   :static-iv uuid15-iv
+                   :key k}
+                  (read-uuid u)))

@@ -13,7 +13,6 @@ Encrypt:
 #+BEGIN_SRC clojure
 (require '[ckent.core :as c])
 (def k (c/random-key))
-;; Blowfish key "748f22bec90d4bea8ab000a69229ef3f"
 (c/uuid k "Testing!")
 ;; => #uuid "444d0eb5-f370-4daa-bde8-abf5ea70d13a"
 (c/uuid k "Tasting!")
@@ -36,6 +35,34 @@ HMAC ensures value was not tampered with and has been decrypted properly:
 ;; => #uuid "887e8ea7-5626-43f6-a072-8fffe04dbc6a"
 (c/decrypt-uuid k *1)
 ;; => nil
+(defn flip-uuid-bit [i u]
+  (-> (c/read-uuid u)
+      (.xor (.shiftLeft BigInteger/ONE i))
+      (c/write-uuid)))
+(c/uuid enc-key "authntic")
+;; => #uuid "1a732511-f232-454f-af97-f7bd5149daf1"
+(every? nil?
+  (map #(c/decrypt-uuid enc-key
+                        (flip-uuid-bit % *1))
+       (range 0 122)))
+;; => true
+#+END_SRC
+
+uuid15 provides more space and less safety:
+#+BEGIN_SRC clojure
+(c/uuid15 enc-key "Hi I'm 15 bytes")
+;; => #uuid "2ffa8ba0-bd05-42b2-b9ec-3b0599e96a82"
+(map #(-> (flip-uuid-bit % *1)
+          (->> (c/decrypt-uuid15 enc-key))
+          ((fnil c/decode-str (c/encode "hmac failure")))
+          (.replaceAll "[^\\p{Print}]" ".")) 
+     (range 0 120 12))
+;; => ("hmac failure" "hmac failure"
+;;     ".x.[.I].5 by4es"
+;;     "D<...m..5 fytes"
+;;     "hmac failure" "hmac failure" "hmac failure" "hmac failure"
+;;     "bz.T......-...."
+;;     "hmac failure")
 #+END_SRC
 
 Adding support for additional types:
@@ -111,16 +138,21 @@ Since we have less than 128 bits, ciphers with >=128 bit block sizes such as AES
 cannot be used in normal block modes. Blowfish has 64-bits bits and is really
 the only choice with these constraints.
 
-We use 64 bits for a Blowfish-encrypted payload, and the remaining 58 bits for a
-(truncated) SHA-256 HMAC. This ensures the output is always indistinguishable
-from randomly-generated values, even if the inputs follow predictable patterns,
-and provides a small but acceptable level of assurance that the value wasn't
-tampered with, and that we're decrypting it with the right key, etc.
+By default, ckent uses 64 bits for a Blowfish-encrypted payload, and the
+remaining 58 bits for a (truncated) SHA-256 HMAC. This ensures the output is
+always indistinguishable from randomly-generated values, even if the inputs
+follow predictable patterns, and provides a small but acceptable level of
+assurance that the value wasn't tampered with, and that we're decrypting it with
+the right key, etc.
 
-Note that RFC 2104 advises against truncating HMACs to fewer than 80 bits, and
-it was written in 1997. 58 bits is enough to deter casual tampering and prevent
-accidentally trying to decrypt a truly random value, but it is probably far too
-few to stop a dedicated attacker.
+There is also a uuid15 function which supports 120-bit (15-byte) payloads,
+leaving only 2 bits for an HMAC. In this case, additional measures should be
+taken to ensure the value has not been tampered with in transit. This function
+is only recommended for values with their own integrity features, such as check
+digits or a strict format. Note this is NOT the same as checking if a database
+record exists; an invalid value must be distinct from a missing record. Ideally,
+more than half of the possible values should be invalid, and invalid values
+should be treated the same as an HMAC failure.
 
 *** BigInteger
 
@@ -130,6 +162,20 @@ operations on and easily convert back and forth to a byte array greatly
 simplifies dealing with the awkward number of usable bits in a UUID.
 
 *** Crypto
+
+**** HMAC
+
+Note that RFC 2104 advises against truncating HMACs to fewer than 80 bits, and
+it was written in 1997. For a 64 bit message, a 58 bit HMAC is plenty to detect
+casual tampering or transmission errors, but may not be enough to stop a
+dedicated attacker from forging values. A custom format with a longer HMAC is
+recommended if you need strong assurance that the message has not been tampered
+with.
+
+The 2-bit HMAC in the uuid15 format is essentially useless and is only present
+because we can only encrypt a whole number of bytes, and the bits must be set to
+something indistinguishable from random. A simpler parity check would expose
+patterns in the plaintext or detectably depend on the ciphertext. 
 
 **** Stream modes
 
@@ -150,14 +196,35 @@ despite not knowing what value it will decrypt to.
 
 **** ECB mode
 
-Since we are only encrypting a single block, the traditional dangers of using
-ECB mode do not apply.
+Since we are only encrypting a single block with the uuid function, the
+traditional dangers of using ECB mode do not apply.
+
+For custom formats that allow for ciphertexts longer than a single block, you
+should NOT use ECB mode.
+
+**** CTS mode
+
+CTS (Ciphertext Stealing) makes it possible to generate ciphertexts that are not
+a multiple of the cipher block size, as long as they are at least one block
+long. Unlike streaming modes, CTS does not introduce any weaknesses.
+
+While CTS is technically concerned more with padding than block chaining, in the
+standard JCE it is always combined with CBC and is specified in place of the
+block chaining mode.
 
 **** Initialization vectors
 
 If it is desired to have the same identifier produce multiple possible outputs,
 it is possible to trade some bits of the HMAC for seed bits to generate an IV,
 or use a custom output format with additional bits.
+
+The uuid15 function uses CTS mode with a static IV, which is essentially
+changing it from CBC mode to ECB mode. However, because of how CTS works, the
+two generated blocks still depend on each other and the dangers of ECB are still
+not applicable.
+
+For custom formats that allow for ciphertexts of two full blocks or more, you
+should NOT use ECB mode or other modes with a static IV.
 
 ** Rationale
 

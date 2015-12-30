@@ -92,7 +92,13 @@
   (let [enc-key (random-key)]
     (round-trip-test #(decrypt-uuid enc-key (uuid enc-key %)))
     (testing "HMAC verification"
-      (is (nil? (decrypt-uuid (random-key) (uuid enc-key "hello"))))) ))
+      (is (nil? (decrypt-uuid (random-key) (uuid enc-key "hello")))))))
+
+(deftest encrypted-uuid15-test
+  (let [enc-key (random-key)]
+    (round-trip-test #(decrypt-uuid15 enc-key (uuid15 enc-key %)))
+    ;; not enough hmac bits to test - will fail 1/4 of the time
+    ))
 
 ;; From http://rosettacode.org/wiki/Entropy#Clojure
 (defn- entropy
