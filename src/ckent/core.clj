@@ -364,23 +364,34 @@
     (when (= (:hmac m) (take-last-bits 58 hmac)) pt)))
 
 
-(def uuid15-iv (hash-iv "Blowfish/CTS/NoPadding" 31337))
+(def uuid15-cipher "Blowfish/CTS/NoPadding")
+(def uuid15-params {:fmt       [[120 :ciphertext] [2 :hmac]]
+                    :static-iv (hash-iv uuid15-cipher 31337)
+                    :cipher    uuid15-cipher})
+
+(defn- mix
+  "xor the lowest 56 bits of i with the next 56.
+
+  This step ensures that, given a full 64-bit block and incomplete 56-bit block and using CTS, any change
+  in the incomplete input block also affects the output of the full block. CTS already ensures that the
+  full block affects the incomplete block's output, because its ciphertext is used as padding.
+
+  This is not, as far as I am aware, any kind of standard practice, and may introduce cryptographic
+  weakness."
+  [i]
+  (-> (take-last-bits 56 i)
+      (.shiftLeft 56)
+      (.xor i)))
 
 (defn uuid15
   [k v]
-  (write-uuid
-   (custom {:fmt [[120 :ciphertext]
-                  [  2 :hmac]]
-            :cipher "Blowfish/CTS/NoPadding"
-            :static-iv uuid15-iv
-            :key k}
-           v)))
+  (->> (encode v)
+       (mix)
+       (custom (assoc uuid15-params :key k))
+       (write-uuid)))
 
 (defn decrypt-uuid15
   [k u]
-  (decrypt-custom {:fmt [[120 :ciphertext]
-                         [  2 :hmac]]
-                   :cipher "Blowfish/CTS/NoPadding"
-                   :static-iv uuid15-iv
-                   :key k}
-                  (read-uuid u)))
+  (->> (read-uuid u)
+       (decrypt-custom (assoc uuid15-params :key k))
+       (mix)))

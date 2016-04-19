@@ -98,7 +98,20 @@
   (let [enc-key (random-key)]
     (round-trip-test #(decrypt-uuid15 enc-key (uuid15 enc-key %)))
     ;; not enough hmac bits to test - will fail 1/4 of the time
-    ))
+
+    (testing "single-bit changes affect full output"
+      (let [p1 (encode "ABCDEFGHIJKLMNO")
+            p2 (.xor p1 BigInteger/ONE)
+            p3 (.xor p1 (.shiftLeft BigInteger/ONE 92))
+            e1 (uuid15 enc-key p1)
+            e2 (uuid15 enc-key p2)
+            e3 (uuid15 enc-key p3)
+            split-format [[32 :r1] [32 :r2] [32 :l1] [24 :l2] [2 2]]
+            [x1 x2 x3] (map #(unpack split-format (read-uuid %)) [e1 e2 e3])]
+        (doseq [k [:l1 :l2 :r1 :r2]]
+          (is (not= (k x1) (k x2)) (str k))
+          (is (not= (k x1) (k x3)) (str k))
+          (is (not= (k x2) (k x3)) (str k)))))))
 
 ;; From http://rosettacode.org/wiki/Entropy#Clojure
 (defn- entropy
