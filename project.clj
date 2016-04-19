@@ -1,4 +1,4 @@
-(defproject ckent "0.1.0-SNAPSHOT"
+(defproject ckent "0.9.1"
   :description "Generate random UUIDs that contain encrypted data"
   :license {:name "Unlicense"
             :url "http://unlicense.org/"}
