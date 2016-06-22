@@ -1,4 +1,4 @@
-* ckent [[https://api.travis-ci.org/pclewis/ckent.svg]]
+* ckent [[https://travis-ci.org/pclewis/ckent][https://api.travis-ci.org/pclewis/ckent.svg]]
 
 ckent is a Clojure library for reversibly transforming sequential internal
 identifiers into valid V4 (random) UUIDs that are indistinguishable from actual
