@@ -4,7 +4,7 @@ ckent is a Clojure library for reversibly transforming sequential internal
 identifiers into valid V4 (random) UUIDs that are indistinguishable from actual
 random UUIDs. Custom formats are also supported.
 
-It is designed to mitigate [[https://www.owasp.org/index.php/Top_10_2013-Insecure_Direct_Object_References][Insecure Direct Object References]], a class of
+It is designed to mitigate [[https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html][Insecure Direct Object References]], a class of
 vulnerability caused by exposing internal identifiers.
 
 ** Usage
